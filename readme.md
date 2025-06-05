@@ -32,16 +32,16 @@ This project implements the Simple Chat Protocol (SCP) v1.0, a stateful applicat
     ```bash
     python server.py
     ```
-    The server will start listening on `0.0.0.0:4433` by default. [cite: 150]
+    The server will start listening on `0.0.0.0:4433` by default.
 
 2.  **Start the Client(s)**:
     Open one or more new terminals to run client instances.
     ```bash
     python client.py <your_username> <server_ip_or_hostname> [server_port]
     ```
-    * `<your_username>`: The username you want to use for the chat. [cite: 2]
-    * `<server_ip_or_hostname>`: The IP address or hostname of the machine running the server (e.g., `localhost` or `127.0.0.1` if running on the same machine). [cite: 151]
-    * `[server_port]`: Optional. The port the server is listening on. Defaults to `4433`. [cite: 150]
+    * `<your_username>`: The username you want to use for the chat. 
+    * `<server_ip_or_hostname>`: The IP address or hostname of the machine running the server (e.g., `localhost` or `127.0.0.1` if running on the same machine). 
+    * `[server_port]`: Optional. The port the server is listening on. Defaults to `4433`.
 
     Example:
     ```bash
@@ -52,32 +52,30 @@ This project implements the Simple Chat Protocol (SCP) v1.0, a stateful applicat
     python client.py bob localhost
     ```
 
-## Client Commands [cite: 157]
+## Client Commands 
 
 Once connected, the client accepts the following commands:
 
-* `/chat <peer_username>`: Request to start a chat with another connected user. [cite: 3]
+* `/chat <peer_username>`: Request to start a chat with another connected user. 
     * Example: `/chat bob`
-* `/accept <peer_username>`: Accept an incoming chat request from `<peer_username>`. [cite: 5]
+* `/accept <peer_username>`: Accept an incoming chat request from `<peer_username>`. 
     * Example: `/accept alice`
-* `/reject <peer_username>`: Reject an incoming chat request from `<peer_username>`. [cite: 5]
+* `/reject <peer_username>`: Reject an incoming chat request from `<peer_username>`. 
     * Example: `/reject alice`
-* `<your message>`: If you are in a chat, typing any text that doesn't start with `/` will send it as a message to your chat partner. [cite: 6]
+* `<your message>`: If you are in a chat, typing any text that doesn't start with `/` will send it as a message to your chat partner.
 * `/endchat`: Ends the current chat session (sends a disconnect to the server).
-* `/disconnect`: Disconnects from the server. [cite: 7]
+* `/disconnect`: Disconnects from the server.
 
 ## Protocol Features Implemented
 
-* Client connection to the server using QUIC. [cite: 2]
-* Simple username-based login (no password). [cite: 2]
-* Server tracks connected users. [cite: 3]
-* Client can request to chat with another connected user. [cite: 3]
-* Server forwards the chat request to the target client. [cite: 4]
-* Target client can accept or reject the request. [cite: 5]
-* If accepted, clients can exchange text messages via the server. [cite: 6]
-* Either client can disconnect and end the chat (notifying the peer). [cite: 7]
-* Minimal error handling. [cite: 8]
-* Messages follow the defined binary PDU format. [cite: 9]
-* Stateful protocol implementation for both client and server (DFAs). [cite: 147, 148]
-
-This implementation provides a foundational prototype of the SCP protocol. [cite: 131]
+* Client connection to the server using QUIC. 
+* Simple username-based login (no password).
+* Server tracks connected users.
+* Client can request to chat with another connected user.
+* Server forwards the chat request to the target client. 
+* Target client can accept or reject the request. 
+* If accepted, clients can exchange text messages via the server.
+* Either client can disconnect and end the chat (notifying the peer). 
+* Minimal error handling.
+* Messages follow the defined binary PDU format.
+* Stateful protocol implementation for both client and server (DFAs).

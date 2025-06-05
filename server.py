@@ -13,7 +13,7 @@ from scp_constants import (
     SCP_CONNECT_SUCCESS, SCP_CONNECT_ERR_USER_EXISTS, SCP_CONNECT_ERR_SERVER_FULL,
     SCP_CHAT_INIT_FORWARDED, SCP_CHAT_INIT_ERR_PEER_NF, SCP_CHAT_INIT_ERR_PEER_BUSY,
     SCP_CHAT_INIT_ERR_SELF_CHAT, SCP_CHAT_FWD_ACCEPTED, SCP_CHAT_FWD_REJECTED,
-    SCP_ERR_MALFORMED_MSG, SCP_ERR_UNEXPECTED_MSG_TYPE, SCP_ERR_INTERNAL_SERVER_ERR
+    SCP_ERR_MALFORMED_MSG, SCP_ERR_UNEXPECTED_MSG_TYPE, SCP_ERR_INTERNAL_SERVER_ERR, SCP_CHAT_INIT_ERR_PEER_REJECTED
 )
 from pdu import (
     SCPHeader, ConnectRespPDU, ChatInitRespPDU, ChatFwdReqPDU, TextPDU,
@@ -26,25 +26,27 @@ from pdu import (
 # (host, port): SCPServerProtocol instance
 connected_clients: Dict[Tuple[str, int], 'SCPServerProtocol'] = {}
 # username: SCPServerProtocol instance
-active_users: Dict[str, 'SCPServerProtocol'] = {} # [cite: 3]
+active_users: Dict[str, 'SCPServerProtocol'] = {}
 # (user1_addr, user2_addr): stream_id for chat
 # or more simply, each client object can store its peer and chat stream
-chat_sessions: Dict[SCPServerProtocol, SCPServerProtocol] = {} # Maps a client to its chat partner
+chat_sessions: Dict['SCPServerProtocol', 'SCPServerProtocol'] = {} # Maps a client to its chat partner
 
 MAX_CLIENTS = 10 # Example limit
 
 class SCPServerProtocol(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.client_state: SCPServerState = SCPServerState.AUTHENTICATING # [cite: 71]
+        self.client_state: SCPServerState = SCPServerState.AUTHENTICATING
         self.username: Optional[str] = None
         self.current_chat_partner: Optional[SCPServerProtocol] = None
         self.pending_chat_request_to: Optional[SCPServerProtocol] = None # User this client wants to chat with
         self.pending_chat_request_from: Optional[SCPServerProtocol] = None # User who wants to chat with this client
 
     def _get_client_key(self) -> Optional[Tuple[str, int]]:
-        if self._quic.network_path:
-            return self._quic.network_path.addr
+        # self._quic is the QuicConnection object
+        if self._quic._network_paths and len(self._quic._network_paths) > 0:
+            # Assuming the first network path is the relevant one for the peer's address
+            return self._quic._network_paths[0].addr
         return None
 
     def send_pdu(self, pdu_data: bytes, stream_id: Optional[int] = None):
@@ -113,10 +115,9 @@ class SCPServerProtocol(QuicConnectionProtocol):
         logging.info(f"Handling {msg_type.name} from {self.username or self._get_client_key()} in state {self.client_state.name}")
 
         # Centralized state validation before message-specific handlers
-        # This implements parts of [cite: 82, 83, 120]
 
         if msg_type == SCPMessageType.CONNECT_REQ:
-            if self.client_state == SCPServerState.AUTHENTICATING: # [cite: 71]
+            if self.client_state == SCPServerState.AUTHENTICATING:
                 self.handle_connect_req(pdu, stream_id)
             else:
                 self._send_unexpected_msg_error(stream_id)
@@ -127,25 +128,25 @@ class SCPServerProtocol(QuicConnectionProtocol):
             self.close() # Terminate connection with unauthenticated user sending non-CONNECT_REQ
             return
 
-        elif msg_type == SCPMessageType.CHAT_INIT_REQ: # [cite: 3]
-            if self.client_state == SCPServerState.IDLE: # [cite: 73]
+        elif msg_type == SCPMessageType.CHAT_INIT_REQ:
+            if self.client_state == SCPServerState.IDLE:
                 self.handle_chat_init_req(pdu, stream_id)
             else:
                 self._send_unexpected_msg_error(stream_id)
         
-        elif msg_type == SCPMessageType.CHAT_FWD_RESP: # [cite: 5]
-            if self.client_state == SCPServerState.AWAITING_CHAT_RESPONSE: # [cite: 75]
+        elif msg_type == SCPMessageType.CHAT_FWD_RESP:
+            if self.client_state == SCPServerState.AWAITING_CHAT_RESPONSE:
                 self.handle_chat_fwd_resp(pdu, stream_id)
             else:
                 self._send_unexpected_msg_error(stream_id)
 
-        elif msg_type == SCPMessageType.TEXT: # [cite: 6]
-            if self.client_state == SCPServerState.IN_CHAT: # [cite: 76]
+        elif msg_type == SCPMessageType.TEXT:
+            if self.client_state == SCPServerState.IN_CHAT:
                 self.handle_text(pdu, stream_id)
             else:
                 self._send_unexpected_msg_error(stream_id)
 
-        elif msg_type == SCPMessageType.DISCONNECT_REQ: # [cite: 7]
+        elif msg_type == SCPMessageType.DISCONNECT_REQ:
             # Can be received in IDLE or IN_CHAT usually
             self.handle_disconnect_req(stream_id)
         
@@ -160,21 +161,21 @@ class SCPServerProtocol(QuicConnectionProtocol):
         self.send_pdu(err_pdu, stream_id)
 
 
-    def handle_connect_req(self, pdu, stream_id: int): # [cite: 2, 18]
+    def handle_connect_req(self, pdu, stream_id: int):
         username = pdu.username
         logging.info(f"CONNECT_REQ from {self._get_client_key()} for username '{username}'")
 
         status = SCP_CONNECT_SUCCESS
         if username in active_users:
-            status = SCP_CONNECT_ERR_USER_EXISTS # [cite: 35]
+            status = SCP_CONNECT_ERR_USER_EXISTS
             logging.warning(f"Username '{username}' already exists.")
         elif len(active_users) >= MAX_CLIENTS:
-            status = SCP_CONNECT_ERR_SERVER_FULL # [cite: 35]
+            status = SCP_CONNECT_ERR_SERVER_FULL
             logging.warning("Server is full.")
         else:
             # Simplified: no actual auth, just username registration
             self.username = username
-            self.client_state = SCPServerState.IDLE # [cite: 72]
+            self.client_state = SCPServerState.IDLE
             active_users[username] = self
             client_key = self._get_client_key()
             if client_key:
@@ -187,7 +188,7 @@ class SCPServerProtocol(QuicConnectionProtocol):
         if status != SCP_CONNECT_SUCCESS:
             self.close() # Close connection if login failed
 
-    def handle_chat_init_req(self, pdu, stream_id: int): # [cite: 4]
+    def handle_chat_init_req(self, pdu, stream_id: int):
         peer_username = pdu.peer_username
         logging.info(f"User '{self.username}' wants to chat with '{peer_username}' (CHAT_INIT_REQ)")
 
@@ -195,14 +196,14 @@ class SCPServerProtocol(QuicConnectionProtocol):
         target_client: Optional[SCPServerProtocol] = active_users.get(peer_username)
 
         if peer_username == self.username:
-            status = SCP_CHAT_INIT_ERR_SELF_CHAT # [cite: 35]
+            status = SCP_CHAT_INIT_ERR_SELF_CHAT
         elif not target_client:
-            status = SCP_CHAT_INIT_ERR_PEER_NF # [cite: 35]
+            status = SCP_CHAT_INIT_ERR_PEER_NF
         elif target_client.client_state != SCPServerState.IDLE: # Check if target is available (not in another chat or busy)
-            status = SCP_CHAT_INIT_ERR_PEER_BUSY # [cite: 35]
+            status = SCP_CHAT_INIT_ERR_PEER_BUSY
         else:
             # Forward request to target client
-            fwd_req_pdu = ChatFwdReqPDU(self.username).pack() # [cite: 54]
+            fwd_req_pdu = ChatFwdReqPDU(self.username).pack()
             # Find an appropriate stream for the target client.
             # This assumes target_client also has an active primary stream.
             target_stream_id = target_client._quic.get_next_available_stream_id(is_unidirectional=False)
@@ -211,12 +212,12 @@ class SCPServerProtocol(QuicConnectionProtocol):
 
             if target_stream_id is not None:
                 target_client.send_pdu(fwd_req_pdu, target_stream_id)
-                target_client.client_state = SCPServerState.AWAITING_CHAT_RESPONSE # [cite: 75]
+                target_client.client_state = SCPServerState.AWAITING_CHAT_RESPONSE
                 target_client.pending_chat_request_from = self
                 
-                self.client_state = SCPServerState.AWAITING_PEER_FOR_INIT # [cite: 74]
+                self.client_state = SCPServerState.AWAITING_PEER_FOR_INIT
                 self.pending_chat_request_to = target_client
-                status = SCP_CHAT_INIT_FORWARDED # [cite: 35]
+                status = SCP_CHAT_INIT_FORWARDED
                 logging.info(f"Forwarded CHAT_FWD_REQ from '{self.username}' to '{peer_username}'. '{self.username}' is AWAITING_PEER_FOR_INIT. '{peer_username}' is AWAITING_CHAT_RESPONSE.")
             else:
                 status = SCP_CHAT_INIT_ERR_PEER_BUSY # Could interpret as cannot reach peer's stream
@@ -224,13 +225,13 @@ class SCPServerProtocol(QuicConnectionProtocol):
 
 
         # Send response to originator
-        resp_pdu = ChatInitRespPDU(status).pack() # [cite: 50]
+        resp_pdu = ChatInitRespPDU(status).pack()
         self.send_pdu(resp_pdu, stream_id)
         if status not in [SCP_CHAT_INIT_FORWARDED]: # if not successfully forwarded, originator stays IDLE
             self.client_state = SCPServerState.IDLE
 
 
-    def handle_chat_fwd_resp(self, pdu, stream_id: int): # [cite: 56]
+    def handle_chat_fwd_resp(self, pdu, stream_id: int):
         originator_username = pdu.originator_username
         accepted = pdu.status_code == SCP_CHAT_FWD_ACCEPTED
         
@@ -259,8 +260,8 @@ class SCPServerProtocol(QuicConnectionProtocol):
                 self.current_chat_partner = originator_client
                 originator_client.current_chat_partner = self
                 
-                self.client_state = SCPServerState.IN_CHAT # [cite: 76, 81]
-                originator_client.client_state = SCPServerState.IN_CHAT # [cite: 76, 81]
+                self.client_state = SCPServerState.IN_CHAT
+                originator_client.client_state = SCPServerState.IN_CHAT
                 
                 chat_sessions[self] = originator_client
                 chat_sessions[originator_client] = self
@@ -270,12 +271,12 @@ class SCPServerProtocol(QuicConnectionProtocol):
                 # For simplicity, we will consider the chat started.
                 # Client will know from its AWAITING_PEER_RESPONSE to IN_CHAT transition triggered by server (e.g. dummy TEXT or new NOTIF)
                 # Or send a specific notification. Let's assume no explicit message, client transitions on seeing TEXT.
-                # The diagram for client (Figure 1 [cite: 69]) shows "recv ServNotif (Peer Acc)" to move to InChat.
+                # The diagram for client (Figure 1 ) shows "recv ServNotif (Peer Acc)" to move to InChat.
                 # Let's send a simple text message as a notification of acceptance for now, or a custom PDU if defined.
                 # For now, let's send an empty text to signal chat start to originator.
-                # Note: The spec [cite: 52] CHAT_INIT_RESP options: SCP_CHAT_INIT_FORWARDED, SCP_CHAT_INIT_ERR_PEER_NF etc.
+                # Note: The spec CHAT_INIT_RESP options: SCP_CHAT_INIT_FORWARDED, SCP_CHAT_INIT_ERR_PEER_NF etc.
                 # It does not define a "chat accepted" status code for CHAT_INIT_RESP.
-                # It shows peer sending FWD_RESP (acc/rej) to server, then server tells originator [cite: 69] "recv ServNotif (Peer Acc)".
+                # It shows peer sending FWD_RESP (acc/rej) to server, then server tells originator "recv ServNotif (Peer Acc)".
                 # We'll simulate this by sending a simple message or a new PDU type.
                 # To stick to spec, we need a server notification. The client diagram has "recv ServNotif (Peer Acc)".
                 # Let's make a simple text notification from server.
@@ -288,7 +289,7 @@ class SCPServerProtocol(QuicConnectionProtocol):
                 logging.info(f"Chat started between '{self.username}' and '{originator_username}'. Both now IN_CHAT.")
 
             else: # Rejected
-                resp_to_originator_pdu = ChatInitRespPDU(SCP_CHAT_INIT_ERR_PEER_REJECTED).pack() # [cite: 35]
+                resp_to_originator_pdu = ChatInitRespPDU(SCP_CHAT_INIT_ERR_PEER_REJECTED).pack()
                 originator_client.send_pdu(resp_to_originator_pdu, originator_stream_id)
                 originator_client.client_state = SCPServerState.IDLE # Originator goes back to IDLE
                 self.client_state = SCPServerState.IDLE # Target (self) also goes back to IDLE
@@ -306,7 +307,7 @@ class SCPServerProtocol(QuicConnectionProtocol):
         self.pending_chat_request_from = None
 
 
-    def handle_text(self, pdu, stream_id: int): # [cite: 22]
+    def handle_text(self, pdu, stream_id: int):
         message = pdu.text_message
         logging.info(f"User '{self.username}' sent TEXT: '{message}'")
 
@@ -332,7 +333,7 @@ class SCPServerProtocol(QuicConnectionProtocol):
             err_pdu = ErrorPDU(SCP_ERR_UNEXPECTED_MSG_TYPE, "Cannot send TEXT, not in chat.").pack()
             self.send_pdu(err_pdu, stream_id)
 
-    def handle_disconnect_req(self, stream_id: int): # [cite: 24]
+    def handle_disconnect_req(self, stream_id: int):
         logging.info(f"DISCONNECT_REQ from '{self.username or self._get_client_key()}'")
         # ACK not implemented as per minimal requirement, but real protocol might ACK DISCONNECT_REQ
         self.cleanup_client(notify_peer=True)
@@ -348,12 +349,12 @@ class SCPServerProtocol(QuicConnectionProtocol):
             del active_users[self.username]
             logging.info(f"User '{self.username}' disconnected.")
 
-        # If in chat, notify partner [cite: 7, 24, 78]
+        # If in chat, notify partner
         if notify_peer and self.current_chat_partner:
             partner = self.current_chat_partner
             logging.info(f"Notifying '{partner.username}' about '{self.username}' disconnection.")
             
-            notif_pdu = DisconnectNotifPDU(self.username).pack() # [cite: 34]
+            notif_pdu = DisconnectNotifPDU(self.username).pack()
             partner_stream_id = partner._quic.get_next_available_stream_id(is_unidirectional=False)
             if partner_stream_id is None: partner_stream_id = partner._quic.create_stream(is_unidirectional=False)
 
@@ -361,7 +362,7 @@ class SCPServerProtocol(QuicConnectionProtocol):
                 partner.send_pdu(notif_pdu, partner_stream_id)
             
             partner.current_chat_partner = None
-            partner.client_state = SCPServerState.IDLE # [cite: 79]
+            partner.client_state = SCPServerState.IDLE
             if partner in chat_sessions: del chat_sessions[partner]
             logging.info(f"'{partner.username}' moved to IDLE after peer disconnect.")
 
@@ -382,6 +383,7 @@ async def main(host="0.0.0.0", port=SERVER_PORT, certificate="cert.pem", private
         alpn_protocols=["scp-v1"], # Application-Layer Protocol Negotiation
         is_client=False,
         max_datagram_frame_size=65536,
+        idle_timeout=600,
     )
     configuration.load_cert_chain(certificate, private_key)
 

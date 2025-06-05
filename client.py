@@ -2,6 +2,8 @@ import asyncio
 import logging
 import sys
 from typing import Optional
+import ssl
+from functools import partial
 
 from aioquic.asyncio import QuicConnectionProtocol, connect
 from aioquic.quic.configuration import QuicConfiguration
@@ -17,16 +19,26 @@ from pdu import (
     DisconnectReqPDU, PDU_UNPACKERS
 )
 
+
 class SCPClientProtocol(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs):
+        # Pop custom kwarg 'username_to_log_in' before passing to super
+        self.username: Optional[str] = kwargs.pop('username_to_log_in', None)
         super().__init__(*args, **kwargs)
-        self.client_state: SCPClientState = SCPClientState.DISCONNECTED
-        self.username: Optional[str] = None
-        self.current_chat_target: Optional[str] = None # Username of person we want to chat with
-        self.pending_fwd_from: Optional[str] = None # Username of person who wants to chat with us
-        self._stream_id: Optional[int] = None # Primary stream for communication
+
+        if not self.username:
+            # This should ideally not happen if username is passed correctly
+            logging.error("Client: Username not provided to protocol constructor!")
+            self.client_state: SCPClientState = SCPClientState.DISCONNECTED
+        else:
+            self.client_state: SCPClientState = SCPClientState.CONNECTING
+
+        self.current_chat_target: Optional[str] = None
+        self.pending_fwd_from: Optional[str] = None
+        self._stream_id: Optional[int] = None
         self.ui_event_loop = asyncio.get_event_loop()
         self.user_input_task = None
+        logging.info(f"Client protocol initialized for user '{self.username}', state: {self.client_state.name}")
 
     def _ensure_stream(self):
         if self._stream_id is None:
@@ -57,10 +69,16 @@ class SCPClientProtocol(QuicConnectionProtocol):
     def quic_event_received(self, event: QuicEvent):
         if isinstance(event, HandshakeCompleted):
             logging.info("Client: QUIC Handshake completed.")
-            self._ensure_stream() # Initialize the stream after handshake
-            # If we have a username from UI, initiate connection
-            if self.username and self.client_state == SCPClientState.CONNECTING:
+            self._ensure_stream()
+            # Username is set in __init__, state is already CONNECTING
+            if self.client_state == SCPClientState.CONNECTING and self.username:
                 self._send_connect_req()
+            elif not self.username:
+                logging.error(
+                    "Client: Handshake completed, but no username is set on protocol. Cannot send CONNECT_REQ.")
+            else:
+                logging.warning(
+                    f"Client: Handshake completed, but not in CONNECTING state (State: {self.client_state.name}). Not sending CONNECT_REQ.")
 
         elif isinstance(event, StreamDataReceived):
             logging.info(f"Client: StreamDataReceived on stream {event.stream_id}: {event.data}")
@@ -98,31 +116,31 @@ class SCPClientProtocol(QuicConnectionProtocol):
         logging.info(f"Client: Handling {msg_type.name} from server in state {self.client_state.name}")
 
         if msg_type == SCPMessageType.CONNECT_RESP:
-            if self.client_state == SCPClientState.CONNECTING: # [cite: 36]
+            if self.client_state == SCPClientState.CONNECTING:
                 self.handle_connect_resp(pdu)
             else:
                 self._log_unexpected_msg(msg_type)
         
         elif msg_type == SCPMessageType.CHAT_INIT_RESP:
             # Received after we sent CHAT_INIT_REQ
-            if self.client_state == SCPClientState.INITIATING_CHAT: # [cite: 36] ("recv CHAT_INIT_RESP (Fail/Busy/Rej)" or "recv CHAT_INIT_RESP (Forwarded)")
+            if self.client_state == SCPClientState.INITIATING_CHAT: # ("recv CHAT_INIT_RESP (Fail/Busy/Rej)" or "recv CHAT_INIT_RESP (Forwarded)")
                 self.handle_chat_init_resp(pdu)
             else:
                 self._log_unexpected_msg(msg_type)
 
-        elif msg_type == SCPMessageType.CHAT_FWD_REQ: # Server wants to forward a chat request to us [cite: 4]
-            if self.client_state == SCPClientState.IDLE: # [cite: 36] diagram shows transition from Idle
+        elif msg_type == SCPMessageType.CHAT_FWD_REQ: # Server wants to forward a chat request to us
+            if self.client_state == SCPClientState.IDLE: # diagram shows transition from Idle
                 self.handle_chat_fwd_req(pdu)
             else:
                 self._log_unexpected_msg(msg_type)
         
-        elif msg_type == SCPMessageType.TEXT: # [cite: 6]
+        elif msg_type == SCPMessageType.TEXT:
             # Can be a regular chat message or a server notification (like chat started)
             self.handle_text(pdu) # Display text if IN_CHAT or AWAITING_PEER_RESPONSE
-                                  # Client DFA (Fig 1) shows recv ServNotif (Peer Acc) from AwaitingPeerResp to InChat [cite: 69]
+                                  # Client DFA (Fig 1) shows recv ServNotif (Peer Acc) from AwaitingPeerResp to InChat
                                   # Also send/recv TEXT in InChat state.
         
-        elif msg_type == SCPMessageType.DISCONNECT_NOTIF: # Peer disconnected [cite: 7, 34]
+        elif msg_type == SCPMessageType.DISCONNECT_NOTIF: # Peer disconnected
             if self.client_state == SCPClientState.IN_CHAT:
                 self.handle_disconnect_notif(pdu)
             else:
@@ -136,17 +154,17 @@ class SCPClientProtocol(QuicConnectionProtocol):
 
     def _log_unexpected_msg(self, msg_type):
         logging.warning(f"Client: Received unexpected {msg_type.name} in state {self.client_state.name}")
-        # Client doesn't send ERROR PDU for this by default, but could. Minimal error handling [cite: 8]
+        # Client doesn't send ERROR PDU for this by default, but could. Minimal error handling
 
     def _send_connect_req(self):
         if self.username:
-            pdu = ConnectReqPDU(self.username).pack() # [cite: 41]
+            pdu = ConnectReqPDU(self.username).pack()
             self.send_pdu(pdu)
             logging.info(f"Client: Sent CONNECT_REQ for user {self.username}")
 
     def handle_connect_resp(self, pdu):
         if pdu.status_code == SCP_CONNECT_SUCCESS:
-            self.client_state = SCPClientState.IDLE # [cite: 36] (Connected to server, not in chat)
+            self.client_state = SCPClientState.IDLE # (Connected to server, not in chat)
             print(f"Successfully connected as '{self.username}'. You are IDLE.")
             print("Commands: /chat <peer_username>, /disconnect")
         else:
@@ -158,16 +176,16 @@ class SCPClientProtocol(QuicConnectionProtocol):
 
     def handle_chat_init_resp(self, pdu): # Response to our CHAT_INIT_REQ
         if pdu.status_code == SCP_CHAT_INIT_FORWARDED:
-            self.client_state = SCPClientState.AWAITING_PEER_RESPONSE # [cite: 36]
+            self.client_state = SCPClientState.AWAITING_PEER_RESPONSE
             print(f"Chat request for '{self.current_chat_target}' forwarded. Waiting for peer's response...")
         else:
-            self.client_state = SCPClientState.IDLE # [cite: 36] (Fail/Busy/Rej)
+            self.client_state = SCPClientState.IDLE # (Fail/Busy/Rej)
             print(f"Chat initiation with '{self.current_chat_target}' failed. Server response: {pdu.status_code}")
             self.current_chat_target = None
 
     def handle_chat_fwd_req(self, pdu): # Someone wants to chat with us
         self.pending_fwd_from = pdu.originator_username
-        self.client_state = SCPClientState.PENDING_PEER_ACCEPT # [cite: 36] ("recv CHAT_FWD_REQ")
+        self.client_state = SCPClientState.PENDING_PEER_ACCEPT # ("recv CHAT_FWD_REQ")
         print(f"\nUser '{self.pending_fwd_from}' wants to chat with you.")
         print(f"Type /accept {self.pending_fwd_from} or /reject {self.pending_fwd_from}")
 
@@ -175,7 +193,7 @@ class SCPClientProtocol(QuicConnectionProtocol):
         # This message might also signal chat start as per server's simplified notification
         if self.client_state == SCPClientState.AWAITING_PEER_RESPONSE and self.current_chat_target:
             # Assuming text like "Chat with X started." means peer accepted
-            # Client DFA (Fig 1) has "recv ServNotif (Peer Acc)" from AwaitingPeerResp to InChat [cite: 69]
+            # Client DFA (Fig 1) has "recv ServNotif (Peer Acc)" from AwaitingPeerResp to InChat
             if "started" in pdu.text_message.lower() and self.current_chat_target in pdu.text_message:
                  self.client_state = SCPClientState.IN_CHAT
                  print(f"\n{pdu.text_message}")
@@ -200,9 +218,9 @@ class SCPClientProtocol(QuicConnectionProtocol):
         else:
             print(f"\nNotification: {pdu.text_message}") # Could be an error message or unexpected TEXT
 
-    def handle_disconnect_notif(self, pdu): # [cite: 7]
+    def handle_disconnect_notif(self, pdu):
         print(f"\nUser '{pdu.peer_username}' has disconnected from the chat.")
-        self.client_state = SCPClientState.IDLE # [cite: 36] diagram ("recv DISCONNECT_NOTIF (PeerLeft)")
+        self.client_state = SCPClientState.IDLE # diagram ("recv DISCONNECT_NOTIF (PeerLeft)")
         self.current_chat_target = None
         print("You are now IDLE. Commands: /chat <peer_username>, /disconnect")
 
@@ -215,38 +233,38 @@ class SCPClientProtocol(QuicConnectionProtocol):
             pass
 
 
-    # --- User initiated actions ---
-    def user_connect(self, username_to_connect: str):
-        if self.client_state == SCPClientState.DISCONNECTED:
-            self.username = username_to_connect
-            self.client_state = SCPClientState.CONNECTING # Set before _send_connect_req is called by handshake_completed
-            # Connection is established by the main 'connect' call. HandshakeCompleted will trigger _send_connect_req.
-            logging.info(f"Client: Attempting to connect as {self.username} (state set to CONNECTING).")
-            # Actual PDU send will be in HandshakeCompleted
-        else:
-            print("Already connected or connecting.")
+    # # --- User initiated actions ---
+    # def user_connect(self, username_to_connect: str):
+    #     if self.client_state == SCPClientState.DISCONNECTED:
+    #         self.username = username_to_connect
+    #         self.client_state = SCPClientState.CONNECTING # Set before _send_connect_req is called by handshake_completed
+    #         # Connection is established by the main 'connect' call. HandshakeCompleted will trigger _send_connect_req.
+    #         logging.info(f"Client: Attempting to connect as {self.username} (state set to CONNECTING).")
+    #         # Actual PDU send will be in HandshakeCompleted
+    #     else:
+    #         print("Already connected or connecting.")
 
     def user_initiate_chat(self, peer_username: str):
         if self.client_state == SCPClientState.IDLE:
             self.current_chat_target = peer_username
-            pdu = ChatInitReqPDU(peer_username).pack() # [cite: 48]
+            pdu = ChatInitReqPDU(peer_username).pack()
             self.send_pdu(pdu)
-            self.client_state = SCPClientState.INITIATING_CHAT # [cite: 36]
+            self.client_state = SCPClientState.INITIATING_CHAT
             print(f"Sent chat request to '{peer_username}'.")
         else:
             print(f"Cannot initiate chat. Current state: {self.client_state.name}")
 
     def user_respond_to_chat(self, accept: bool, originator_username: str):
         if self.client_state == SCPClientState.PENDING_PEER_ACCEPT and self.pending_fwd_from == originator_username:
-            status = SCP_CHAT_FWD_ACCEPTED if accept else SCP_CHAT_FWD_REJECTED # [cite: 35]
-            pdu = ChatFwdRespPDU(status, originator_username).pack() # [cite: 56]
+            status = SCP_CHAT_FWD_ACCEPTED if accept else SCP_CHAT_FWD_REJECTED
+            pdu = ChatFwdRespPDU(status, originator_username).pack()
             self.send_pdu(pdu)
             
             if accept:
                 # Server will confirm and move us to IN_CHAT typically via a notification/first message
                 # For now, client optimistically assumes it will go to IDLE and wait for server.
                 # The server should transition both to IN_CHAT and perhaps send a confirmation.
-                # Client diagram shows transition directly to InChat from PendingAccept if user accepts [cite: 69]
+                # Client diagram shows transition directly to InChat from PendingAccept if user accepts
                 # However, this relies on server confirming. We will move to IDLE here,
                 # and server TEXT message (e.g. "Chat started") will move to IN_CHAT.
                 # This is slightly different than the diagram but simpler for now until a specific "chat started" PDU.
@@ -254,7 +272,7 @@ class SCPClientProtocol(QuicConnectionProtocol):
                 self.current_chat_target = originator_username # Tentatively set
                 print(f"Responded {'accept' if accept else 'reject'} to {originator_username}. Waiting for server confirmation.")
             else:
-                self.client_state = SCPClientState.IDLE # [cite: 36] diagram ("User: reject")
+                self.client_state = SCPClientState.IDLE # diagram ("User: reject")
                 print(f"Rejected chat with {originator_username}.")
             self.pending_fwd_from = None
         else:
@@ -262,7 +280,7 @@ class SCPClientProtocol(QuicConnectionProtocol):
 
     def user_send_text(self, message: str):
         if self.client_state == SCPClientState.IN_CHAT:
-            pdu = TextPDU(message).pack() # [cite: 59]
+            pdu = TextPDU(message).pack()
             self.send_pdu(pdu)
         else:
             print(f"Cannot send message. Not in a chat (State: {self.client_state.name}).")
@@ -276,7 +294,7 @@ class SCPClientProtocol(QuicConnectionProtocol):
             # A proper implementation would require a CHAT_CLOSE_REQ or similar.
             # Let's interpret "/endchat" as client just wants to go IDLE locally.
             # If server needs to know, a DISCONNECT_REQ would be sent for the session.
-            # The proposal implies "Either client can disconnect and end the chat." [cite: 7]
+            # The proposal implies "Either client can disconnect and end the chat."
             # and then "The server notifies the peer if the other client disconnects."
             # So sending DISCONNECT_REQ is the way.
             print("Ending chat by sending DISCONNECT_REQ...")
@@ -287,9 +305,9 @@ class SCPClientProtocol(QuicConnectionProtocol):
 
     def user_disconnect(self): # Disconnect from server
         if self.client_state not in [SCPClientState.DISCONNECTED, SCPClientState.DISCONNECTING]:
-            pdu = DisconnectReqPDU().pack() # [cite: 61]
+            pdu = DisconnectReqPDU().pack()
             self.send_pdu(pdu)
-            self.client_state = SCPClientState.DISCONNECTING # [cite: 36]
+            self.client_state = SCPClientState.DISCONNECTING
             print("Sent disconnect request to server.")
             # Connection will be terminated by server or aioquic.
             # self.close() # This can be called here, or wait for ConnectionTerminated
@@ -297,9 +315,17 @@ class SCPClientProtocol(QuicConnectionProtocol):
             print("Not connected or already disconnecting.")
 
 
-async def amain(client: SCPClientProtocol, host: str, port: int, username_to_connect: str):
+async def amain(client: SCPClientProtocol):
     """Main async function to handle user input."""
-    client.user_connect(username_to_connect) # Set username and state, actual connect PDU on handshake
+    # client.user_connect(username_to_connect) # Set username and state, actual connect PDU on handshake
+
+    if client.client_state != SCPClientState.CONNECTING and client.client_state != SCPClientState.IDLE:
+        if client.client_state == SCPClientState.DISCONNECTED and not client.username:
+             logging.error("Client is disconnected (no username). Cannot start UI loop.")
+             return
+        elif client.client_state == SCPClientState.DISCONNECTED:
+             logging.warning(f"Client {client.username} is DISCONNECTED. UI loop may not function.")
+             # Allow it to proceed to see if it reconnects or exits gracefully based on user input /disconnect.
 
     while client.client_state != SCPClientState.DISCONNECTED:
         try:
@@ -371,7 +397,7 @@ if __name__ == "__main__":
     )
 
     if len(sys.argv) < 3:
-        print("Usage: python client.py <username> <server_host_or_ip> [server_port]") # [cite: 151, 152]
+        print("Usage: python client.py <username> <server_host_or_ip> [server_port]")
         sys.exit(1)
 
     username = sys.argv[1]
@@ -382,28 +408,39 @@ if __name__ == "__main__":
         alpn_protocols=["scp-v1"],
         is_client=True,
         max_datagram_frame_size=65536,
+        idle_timeout=600,
     )
     # For simplicity, client does not verify server certificate.
     # In a real scenario, load trusted CAs: configuration.load_verify_locations(cafile="pycacert.pem")
-    configuration.verify_mode = asyncio.ssl.CERT_NONE # NOT SECURE FOR PRODUCTION
+    configuration.verify_mode = ssl.CERT_NONE # NOT SECURE FOR PRODUCTION
 
     loop = asyncio.get_event_loop()
     try:
         async def run_client():
+            protocol_factory = partial(SCPClientProtocol, username_to_log_in=username)
             async with connect(
                 server_host,
                 server_port,
                 configuration=configuration,
-                create_protocol=SCPClientProtocol,
+                create_protocol=protocol_factory,
             ) as client_protocol:
                 if client_protocol:
+                    if client_protocol.client_state == SCPClientState.DISCONNECTED:
+                        logging.error(
+                            f"Client protocol for {username} failed to initialize correctly (is in DISCONNECTED state). Aborting.")
+                        return  # Don't proceed if protocol could not be set up with username
+
                     # Start the user input task
+                    # The amain function no longer needs to be passed the username for initial connection
                     client_protocol.user_input_task = asyncio.create_task(
-                        amain(client_protocol, server_host, server_port, username)
+                        amain(client_protocol)  # Pass only client_protocol
                     )
-                    await client_protocol.user_input_task
+                    try:
+                        await client_protocol.user_input_task
+                    except asyncio.CancelledError:
+                        logging.info("Client's amain task was cancelled.")  # Handle cancellation
                 else:
-                    logging.error("Failed to establish QUIC connection.")
+                    logging.error("Failed to establish QUIC connection or create protocol.")
         
         loop.run_until_complete(run_client())
 

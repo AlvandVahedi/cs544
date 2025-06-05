@@ -1,2 +1,4 @@
 cert.pem
 privkey.pem
+__pycache__/pdu.cpython-312.pyc __pycache__/scp_constants.cpython-312.pyc
+.idea/SCP.iml .idea/inspectionProfiles .idea/misc.xml .idea/modules.xml .idea/vcs.xml .idea/workspace.xml

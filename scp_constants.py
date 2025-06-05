@@ -1,9 +1,9 @@
 import enum
 
 # Protocol Version
-SCP_VERSION_1_0 = 0x01 # [cite: 33]
+SCP_VERSION_1_0 = 0x01
 
-# Message Types Enum [cite: 33, 34]
+# Message Types Enum
 class SCPMessageType(enum.IntEnum):
     CONNECT_REQ = 0x01
     CONNECT_RESP = 0x02
@@ -17,36 +17,36 @@ class SCPMessageType(enum.IntEnum):
     ACK = 0x0A  # General acknowledgment
     ERROR = 0x0B # Error notification
 
-# Status Codes for SCP_MSG_CONNECT_RESP [cite: 35]
+# Status Codes for SCP_MSG_CONNECT_RESP
 SCP_CONNECT_SUCCESS = 0x00
 SCP_CONNECT_ERR_USER_EXISTS = 0x01
 SCP_CONNECT_ERR_AUTH_FAILED = 0x02 # e.g. unknown user
 SCP_CONNECT_ERR_SERVER_FULL = 0x03
 SCP_CONNECT_ERR_VERSION_MISMATCH = 0x04
 
-# Status Codes for SCP_MSG_CHAT_INIT_RESP [cite: 35]
+# Status Codes for SCP_MSG_CHAT_INIT_RESP
 SCP_CHAT_INIT_FORWARDED = 0x00
 SCP_CHAT_INIT_ERR_PEER_NF = 0x01 # Peer Not Found
 SCP_CHAT_INIT_ERR_PEER_BUSY = 0x02
 SCP_CHAT_INIT_ERR_SELF_CHAT = 0x03
 SCP_CHAT_INIT_ERR_PEER_REJECTED = 0x04
 
-# Status Codes for SCP_MSG_CHAT_FWD_RESP [cite: 35]
+# Status Codes for SCP_MSG_CHAT_FWD_RESP
 SCP_CHAT_FWD_ACCEPTED = 0x00
 SCP_CHAT_FWD_REJECTED = 0x01
 
-# Status Codes for SCP_MSG_ACK [cite: 35]
+# Status Codes for SCP_MSG_ACK
 SCP_ACK_SUCCESS = 0x00
 SCP_ACK_FAILURE = 0x01
 
-# General Error Codes for SCP_MSG_ERROR [cite: 36]
+# General Error Codes for SCP_MSG_ERROR
 SCP_ERR_MALFORMED_MSG = 0x0001
 SCP_ERR_UNEXPECTED_MSG_TYPE = 0x0002
 SCP_ERR_INVALID_PAYLOAD_LEN = 0x0003
 SCP_ERR_INTERNAL_SERVER_ERR = 0x0004
 SCP_ERR_UNSUPPORTED_VERSION = 0x0005
 
-# Client Protocol States Enum [cite: 36]
+# Client Protocol States Enum
 class SCPClientState(enum.Enum):
     DISCONNECTED = 0
     CONNECTING = 1
@@ -57,7 +57,7 @@ class SCPClientState(enum.Enum):
     IN_CHAT = 6 # Chat session active
     DISCONNECTING = 7 # Sent DISCONNECT_REQ
 
-# Server Protocol States Enum (per client connection) [cite: 38]
+# Server Protocol States Enum (per client connection)
 class SCPServerState(enum.Enum):
     AUTHENTICATING = 0 # Received CONNECT_REQ, validating
     IDLE = 1 # Client authenticated, not in chat
@@ -66,7 +66,7 @@ class SCPServerState(enum.Enum):
     IN_CHAT = 4 # Client is in an active chat
     RELAYING_DISCONNECT = 5 # Client is disconnecting, need to notify peer if in chat
 
-# Hardcoded server port [cite: 150]
+# Hardcoded server port
 SERVER_PORT = 4433
 SERVER_HOST = 'localhost' # Default server host for client
 
